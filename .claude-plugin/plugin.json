@@ -1,6 +1,6 @@
 {
   "name": "session-pane",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "A side pane that shows the session's usage, goal, tasks, PRs, activity and turns",
   "author": { "name": "stopyellingatme", "url": "https://github.com/stopyellingatme" },
   "homepage": "https://github.com/stopyellingatme/session-pane",

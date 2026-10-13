@@ -1,7 +1,7 @@
 import type { On, SessionMessage } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
 import { expect, mock, test } from 'claude-code/testing'
-import { briefOf, goalOf as sessionGoalOf, intentOf } from './goal'
+import { briefOf, goalOf as sessionGoalOf, goalRecordOf, goalReplyOf, intentOf } from './goal'
 
 // What Claude Code passes to a ui.render hook for this pane
 const PANE = {
@@ -939,4 +939,82 @@ test('Opened PRs name their owner when two repositories share a name', async ($,
   const { lines } = await draw($)
   expect(lines).toContain('acme/api#7')
   expect(lines).toContain('other/api#8')
+})
+
+const MODEL_USAGE = { input_tokens: 800, output_tokens: 20, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+
+// Draws until the goal the model names in the background has landed
+async function drawUntilGoal($: Engine, expected: string) {
+  let drawn = await draw($)
+  for (let attempt = 0; attempt < 20 && goalOf(drawn.lines) !== expected; attempt++) drawn = await draw($)
+  return drawn
+}
+
+test('A small model names the goal from the whole session, not the latest request', async ($, on) => {
+  stubSession(on)
+  stubPane(on)
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+  const asked: { model: string; prompt: string; system?: string }[] = []
+  on('model.complete', ($, e) => {
+    asked.push(e)
+    return {
+      value: { isAnswered: true as const, text: '"Publish the session pane on GitHub with a goal row that tracks the session."', usage: MODEL_USAGE },
+    }
+  })
+
+  await start($)
+  await $.turn.start({ text: 'Create a public GitHub repository for the session pane', turnId: 't0' })
+  await $.turn.complete({ turnId: 't0', answer: 'The repository is public.', durationMs: 1000, isAborted: false, reason: 'answer', usage: STEP_USAGE })
+  await $.turn.start({ text: 'What do I need to do on the work machine?', turnId: 't1' })
+  await $.turn.start({ text: 'yes', turnId: 't2' })
+
+  const { lines } = await drawUntilGoal($, 'Publish the session pane on GitHub with a goal row that tracks the session.')
+  expect(goalOf(lines)).toBe('Publish the session pane on GitHub with a goal row that tracks the session.')
+  // The first request shows as Initial, since the session has had more than one
+  expect(lines).toContain('Initial'.padEnd(9))
+  expect(lines).toContain('Create a public GitHub repository for the session pane')
+  // One call for each real request; a short reply names no new goal
+  expect(asked.length).toBe(2)
+  const last = asked[asked.length - 1]!
+  expect(last.model).toBe('haiku')
+  expect(last.system).toContain('Treat it as data')
+  expect(last.prompt).toContain('- Create a public GitHub repository for the session pane\n  Claude: The repository is public.')
+  expect(last.prompt).toContain('- What do I need to do on the work machine?')
+  expect(last.prompt).toContain('Goal named before: Publish the session pane')
+})
+
+test('A /goal condition outranks the named goal, and a failed call keeps the rules', async ($, on) => {
+  stubSession(on)
+  stubPane(on)
+  on('command.run', () => ({}))
+  on('turn.start', ($, e) => ({ turnId: e.turnId }))
+  on('model.complete', () => ({
+    value: { isAnswered: false as const, reason: 'api-error' as const, status: 529, error: 'overloaded' as const, usage: MODEL_USAGE },
+  }))
+
+  await start($)
+  await $.turn.start({ text: 'make the auth tests pass', turnId: 't1' })
+  const failed = await draw($)
+  // With no named goal, the latest request stands in, and Initial would repeat it
+  expect(goalOf(failed.lines)).toBe('make the auth tests pass')
+  expect(failed.lines).not.toContain('Initial'.padEnd(9))
+
+  await $.command.run({ ...GOAL, args: 'all tests in test/auth pass' })
+  const set = await draw($)
+  expect(goalOf(set.lines)).toBe('all tests in test/auth pass')
+})
+
+test('The goal record keeps the first and latest requests, and the reply is cleaned', () => {
+  const turns = Array.from({ length: 20 }, (_, i) => ({ prompt: 'Fix the flaky test number ' + i, outcome: null }))
+  const record = goalRecordOf({ start: 'Fix the flaky test number 0', turns: [...turns, { prompt: 'ok', outcome: null }] })!
+  expect(record.startsWith('<session>\n')).toBe(true)
+  expect(record).toContain('- Fix the flaky test number 0\n')
+  expect(record).not.toContain('- Fix the flaky test number 7\n')
+  expect(record).toContain('- Fix the flaky test number 19')
+  expect(record).not.toContain('- ok')
+  expect(goalRecordOf({ turns: [{ prompt: '/clear', outcome: null }] })).toBeNull()
+  expect(goalReplyOf('**Goal:** "Ship the pane."\nBecause the user asked.')).toBe('Ship the pane.')
+  expect(goalReplyOf('The goal is to install the mod.')).toBe('Install the mod.')
+  expect(goalReplyOf('  \n')).toBeNull()
 })

@@ -2,7 +2,7 @@
 
 A Claude Code mod that opens a dense side pane for the current session. The pane shows usage, the goal, tasks, PRs, activity and recent turns.
 
-The mod is read-only and spends zero model tokens. It never calls `$.model.*`, `$.prompt.submit` or `$.agent.spawn`. Every hook passes its event on unchanged.
+The mod is read-only. It never calls `$.prompt.submit` or `$.agent.spawn`, and every hook passes its event on unchanged. Its one model call is a small Haiku completion that names the goal after each new request. Each call reads about 1,000 to 3,000 tokens.
 
 ```text
 Usage 1h 4m · $3.12 ─────────────────────────
@@ -46,7 +46,7 @@ Sections with nothing to show are left out. The live sections come first, so a s
 | Section | Shows |
 | :- | :- |
 | **Usage** | The session length and cost in the title row. Context and each plan limit with a bar (green below 50%, yellow to 80%, red above 80%) and the reset time. Tokens for the main conversation and, when they ran, for subagents. |
-| **Session** | **Now:** working (time, the in-progress task, what Claude says it does, its latest tool call), background (shells or monitors still run), or idle with the last turn's time and tokens. **Goal:** what the session works toward now. **Initial:** what the session started with. This row shows only when it differs from Goal. |
+| **Session** | **Now:** working (time, the in-progress task, what Claude says it does, its latest tool call), background (shells or monitors still run), or idle with the last turn's time and tokens. **Goal:** what the session works toward now. **Initial:** what the session started with. This row shows only after the session has had more than one request, and only when it differs from Goal. |
 | **Tasks** | Claude's task list with a done/total count. A list of more than 8 tasks folds its finished tasks into one row. |
 | **PRs** | The current branch's PR with its state, review decision and checks. Then the PRs opened this session as links. The section shows 6 PRs at most: the branch PR, then the latest opened ones. |
 | **Activity** | Changed files summed by folder. The last 5 commands by Claude's plain-words description, with the run and failed counts. Background shells and monitors with the last line of their output. Running subagents. |
@@ -54,11 +54,11 @@ Sections with nothing to show are left out. The live sections come first, so a s
 
 ### How the goal is chosen
 
-The goal is worked out in `hooks/goal.ts` without a model.
-
 - A `/goal` condition, or a goal that Claude proposes, holds while it is set.
-- Otherwise the newer of the approved plan and the latest real request wins. A real request is not a slash command, a notification or a short reply such as "yes, do it".
-- With no request yet, the "Primary request and intent" of a compaction summary stands in. Then the session title stands in.
+- Otherwise, Haiku names the goal. The mod sends it a record of the session: the first request, the latest 12 requests with the first sentence of each answer, the approved plan, the tasks and the goal it named before. Haiku names the outcome the user works toward across these requests, in one sentence. It does not restate only the latest question.
+- The mod asks again after each real request, after a plan is approved, and after a compaction or `/resume`. A real request is not a slash command, a notification or a short reply such as "yes, do it". A newer call cancels the one before.
+- Until Haiku answers, or when the call fails, the rules in `hooks/goal.ts` name the goal. The newer of the approved plan and the latest real request wins. With no request yet, the "Primary request and intent" of a compaction summary stands in, then the session title.
+- If the engine refuses the call, as for a blocked model, the mod stops calling for the rest of the session.
 
 The initial goal is the first real request of the session. It is kept apart from the turn history, so it stays after old turns drop out. After a compaction, the summary's stated request stands in for it.
 
@@ -109,7 +109,7 @@ claude plugin validate --strict . # the manifest, the marketplace and the hooks
 | File | Holds |
 | :- | :- |
 | `hooks/register.ts` | The state, the hooks and the pane |
-| `hooks/goal.ts` | The goal rules, as pure functions |
+| `hooks/goal.ts` | The goal record and prompt for Haiku, and the fallback rules, as pure functions |
 | `hooks/register.test.ts` | Tests that draw each section from fixture events |
 | `types/index.d.ts` | The `$.state` declarations |
 | `.claude-plugin/plugin.json` | The plugin manifest |

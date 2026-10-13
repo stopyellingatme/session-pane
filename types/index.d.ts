@@ -80,6 +80,8 @@ declare module 'claude-code' {
       intent: string | null
       // The session's first request, captured once; it outlives the capped timeline
       start: { text: string; at: number | null } | null
+      // The goal a small model named from a record of the session
+      named: { text: string; at: number } | null
       action: string | null
       timeline: SessionPaneTurnRecord[]
       startedAt: number | null

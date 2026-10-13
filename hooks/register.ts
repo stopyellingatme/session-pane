@@ -14,10 +14,24 @@ import type {
   TurnUsage,
 } from 'claude-code'
 import { atom, read, update } from 'claude-code'
-import { CONTINUED, NO_PROMPT, briefOf, goalOf, intentOf, isAsk, isContinuation, noteOf, startOf } from './goal'
+import {
+  CONTINUED,
+  GOAL_SYSTEM,
+  NO_PROMPT,
+  briefOf,
+  goalOf,
+  goalRecordOf,
+  goalReplyOf,
+  intentOf,
+  isAsk,
+  isContinuation,
+  noteOf,
+  startOf,
+} from './goal'
 
-// Read-only: every hook passes its event on unchanged, and nothing here calls
-// a model, submits a prompt or spawns an agent.
+// Read-only: every hook passes its event on unchanged, and nothing here submits
+// a prompt or spawns an agent. The one model call is a small completion that
+// names the goal after each new request.
 
 const PANE = 'session-pane'
 const PANE_COLUMNS = 48
@@ -44,6 +58,10 @@ const ENDED_AGENTS = new Set(['completed', 'failed', 'killed'])
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit'])
 const GOAL_CLEAR_WORDS = new Set(['clear', 'stop', 'off', 'reset', 'none', 'cancel'])
 const MAX_TIMELINE = 50
+// The goal is named by a small, fast model, with no tools and no history
+const GOAL_MODEL = 'haiku'
+const GOAL_MAX_TOKENS = 100
+const GOAL_TIMEOUT_MS = 20_000
 // The starting request is cut to about three lines of the pane
 const START_CHARS = 110
 // Prompts are kept long enough to show whole as the goal, and cut shorter in
@@ -81,6 +99,7 @@ const goal = atom({ plugin: 'session-pane', key: 'goal' } as const, null)
 const plan = atom({ plugin: 'session-pane', key: 'plan' } as const, null)
 const intent = atom({ plugin: 'session-pane', key: 'intent' } as const, null)
 const start = atom({ plugin: 'session-pane', key: 'start' } as const, null)
+const named = atom({ plugin: 'session-pane', key: 'named' } as const, null)
 const action = atom({ plugin: 'session-pane', key: 'action' } as const, null)
 const note = atom({ plugin: 'session-pane', key: 'note' } as const, null)
 const planAt = atom({ plugin: 'session-pane', key: 'planAt' } as const, null)
@@ -101,6 +120,11 @@ let isPaneOpen = false
 let isPrLoading = false
 let isOutputLoading = false
 const seenAgents = new Set<string>()
+// Only the latest goal request counts: a newer one aborts the one before
+let goalRun = 0
+let goalStop: AbortController | null = null
+// A model the engine refuses to call stays refused, so the rules name the goal
+let isGoalModelOff = false
 
 type Measured = { context: SessionContextUsage; rateLimits: readonly SessionRateLimit[]; cost?: SessionCost }
 
@@ -247,6 +271,41 @@ async function refreshAgents($: EngineInterface) {
     await update($, agents, () => running)
   } catch {
     // The next subagent event refreshes it again
+  }
+}
+
+// Asks a small model for the goal the session works toward, from a record of
+// its requests, plan and tasks. Runs in the background; on any failure the
+// last named goal, or the rules in goal.ts, stay in place.
+async function nameGoal($: EngineInterface) {
+  if (isGoalModelOff) return
+  const known = await read($, named)
+  const record = goalRecordOf({
+    title: await read($, title),
+    start: (await read($, start))?.text,
+    intent: await read($, intent),
+    plan: await read($, plan),
+    previous: known?.text,
+    tasks: await read($, tasks),
+    turns: await read($, timeline),
+  })
+  if (!record) return
+  goalStop?.abort()
+  const stop = new AbortController()
+  goalStop = stop
+  const run = ++goalRun
+  try {
+    const reply = await $.model.complete(
+      { model: GOAL_MODEL, system: GOAL_SYSTEM, prompt: record, effort: 'low', maxTokens: GOAL_MAX_TOKENS, timeoutMs: GOAL_TIMEOUT_MS },
+      { signal: stop.signal },
+    )
+    const text = reply.isAnswered ? goalReplyOf(reply.text) : null
+    if (run !== goalRun || !text) return
+    const at = await $.clock.now()
+    await update($, named, () => ({ text, at }))
+  } catch {
+    // Only a request the engine refuses to send rejects, as for a blocked model
+    isGoalModelOff = true
   }
 }
 
@@ -605,6 +664,7 @@ export function register(on: On) {
     await loadTimeline($).catch(() => {})
     await loadDescriptions($).catch(() => {})
     await loadShells($).catch(() => {})
+    if ((await read($, named)) === null) void nameGoal($)
     $.clock.every(PR_POLL_MS, () => {
       if (isPaneOpen) void refreshPr($)
     })
@@ -625,11 +685,18 @@ export function register(on: On) {
     const named = e.session_title
     if (named) await update($, title, () => clip(named, MAX_PROMPT))
     // /clear, /resume and /branch reset $.state without a new session.start
-    if (e.source === 'compact') await loadTimeline($).catch(() => {})
+    if (e.source === 'compact') {
+      await loadTimeline($).catch(() => {})
+      void nameGoal($)
+    }
     if (e.source === 'resume') await update($, shells, () => [])
     if (e.source === 'clear' || e.source === 'resume' || e.source === 'fork') {
+      // A goal named for the session before must not land in the new state
+      goalStop?.abort()
+      goalRun += 1
       await loadUsage($)
       await loadTimeline($).catch(() => {})
+      if (e.source !== 'clear') void nameGoal($)
       if (isPaneOpen) void refreshPr($)
     }
     return next(e)
@@ -694,6 +761,8 @@ export function register(on: On) {
         { id: e.turnId, at, prompt, outcome: null, durationMs: null, edits: 0, commands: 0, isAborted: false },
       ].slice(-MAX_TIMELINE),
     )
+    // A short reply keeps the goal, so only a new request names it again
+    if (brief) void nameGoal($)
     return next(e)
   })
 
@@ -896,6 +965,7 @@ export function register(on: On) {
       const at = await $.clock.now()
       await update($, plan, () => approved)
       await update($, planAt, () => at)
+      void nameGoal($)
     }
     return result
   })
@@ -1098,18 +1168,22 @@ export function register(on: On) {
       sessionRows.push(field('Now', line([dim('○ Idle'), ...lastLine])))
     }
     // The goal follows the session: the /goal condition while one is set, else
-    // the newer of the approved plan and the latest real request. The request
-    // the session started from shows under it once the goal has moved on.
-    const aim = goalOf({
-      goal: currentGoal?.condition,
-      plan: approvedPlan ? { text: approvedPlan, at: await read($, planAt) } : null,
-      intent: await read($, intent),
-      prompts: turns.map(entry => ({ text: entry.prompt, at: entry.at })),
-      title: sessionTitle,
-    })
+    // the goal the small model named, else the rules in goal.ts. The request
+    // the session started from shows under it once there is more than one.
+    const stated = await read($, intent)
+    const aim =
+      (currentGoal ? null : await read($, named)) ??
+      goalOf({
+        goal: currentGoal?.condition,
+        plan: approvedPlan ? { text: approvedPlan, at: await read($, planAt) } : null,
+        intent: stated,
+        prompts: turns.map(entry => ({ text: entry.prompt, at: entry.at })),
+        title: sessionTitle,
+      })
     const first = await read($, start)
+    const hasMoved = currentGoal !== null || stated !== null || turns.filter(entry => isAsk(entry.prompt)).length > 1
     if (aim) sessionRows.push(field('Goal', wrapped(aim.text, { bold: true })))
-    if (aim && first && first.text !== aim.text) {
+    if (aim && first && hasMoved && first.text !== aim.text) {
       sessionRows.push(field('Initial', wrapped(clip(first.text, START_CHARS), { dimColor: true })))
     }
 
