@@ -1,0 +1,12 @@
+{
+  "name": "session-pane",
+  "description": "A dense, read-only side pane for Claude Code sessions",
+  "owner": { "name": "stopyellingatme" },
+  "plugins": [
+    {
+      "name": "session-pane",
+      "source": "./",
+      "description": "A side pane that shows the session's usage, goal, tasks, PRs, activity and turns"
+    }
+  ]
+}

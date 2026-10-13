@@ -1,0 +1,11 @@
+{
+  "name": "session-pane",
+  "version": "0.2.0",
+  "description": "A side pane that shows the session's usage, goal, tasks, PRs, activity and turns",
+  "author": { "name": "stopyellingatme", "url": "https://github.com/stopyellingatme" },
+  "homepage": "https://github.com/stopyellingatme/session-pane",
+  "repository": "https://github.com/stopyellingatme/session-pane",
+  "license": "MIT",
+  "keywords": ["mod", "pane", "session", "usage"],
+  "types": "./types/index.d.ts"
+}
